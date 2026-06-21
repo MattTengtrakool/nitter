@@ -61,8 +61,11 @@ proc getOauthHeader(url, oauthToken, oauthTokenSecret: string): string =
 
   return getOauth1RequestHeader(params)["authorization"]
 
-proc getCookieHeader(authToken, ct0: string): string =
-  "auth_token=" & authToken & "; ct0=" & ct0
+proc getCookieHeader(session: Session): string =
+  if session.cookieHeader.len > 0:
+    session.cookieHeader
+  else:
+    "auth_token=" & session.authToken & "; ct0=" & session.ct0
 
 proc genHeaders*(session: Session, url: Uri, skipTid: bool): Future[HttpHeaders] {.async.} =
   result = newHttpHeaders({
@@ -84,7 +87,7 @@ proc genHeaders*(session: Session, url: Uri, skipTid: bool): Future[HttpHeaders]
   of SessionKind.cookie:
     result["x-twitter-auth-type"] = "OAuth2Session"
     result["x-csrf-token"] = session.ct0
-    result["cookie"] = getCookieHeader(session.authToken, session.ct0)
+    result["cookie"] = getCookieHeader(session)
     result["referer"] = "https://x.com/"
     result["sec-ch-ua"] = """"Google Chrome";v="142", "Chromium";v="142", "Not A(Brand";v="24""""
     result["sec-ch-ua-mobile"] = "?0"
@@ -110,6 +113,26 @@ proc getAndValidateSession*(req: ApiReq): Future[Session] {.async.} =
       echo "[sessions] Empty cookie credentials, session: ", result.pretty
       raise rateLimitError()
 
+proc applyRateLimitHeaders(session: Session; req: ApiReq; headers: HttpHeaders) =
+  if session.isNil:
+    return
+
+  let now = epochTime().int
+  var reset = now + 60
+  if headers.hasKey(rlReset):
+    reset = parseInt(headers[rlReset])
+  elif headers.hasKey("retry-after"):
+    reset = now + parseInt(headers["retry-after"])
+
+  let
+    api = req.endpoint(session)
+    limit = if api in session.apis: session.apis[api].limit else: 0
+
+  session.setRateLimit(req, 0, reset, limit)
+  let cooldownMs = max(0, reset - now) * 1000
+  if cooldownMs > 0:
+    session.setCooldown(cooldownMs)
+
 template fetchImpl(result, fetchBody) {.dirty.} =
   once:
     pool = HttpPool()
@@ -120,24 +143,34 @@ template fetchImpl(result, fetchBody) {.dirty.} =
       of oauth: req.oauth.skipTid
       of cookie: req.cookie.skipTid
     let headers = await genHeaders(session, url, skipTid)
+    let useApiProxy = apiProxy.len > 0 and "/1.1/" notin url.path
+    let fetchUrl =
+      if useApiProxy: ($url).replace("https://", apiProxy)
+      else: $url
+    let proxyKey =
+      if useApiProxy: ""
+      else: getHttpProxyKey(session)
 
-    pool.use(headers):
+    pool.use(headers, proxyKey):
       template getContent =
-        # TODO: this is a temporary simple implementation
-        if apiProxy.len > 0 and "/1.1/" notin url.path:
-          resp = await c.get(($url).replace("https://", apiProxy))
-        else:
-          resp = await c.get($url)
+        resp = await c.get(fetchUrl)
         result = await resp.body
 
       getContent()
 
       if resp.status == $Http503:
         badClient = true
+        session.setCooldown()
         raise newException(BadClientError, "Bad client")
 
       if resp.status == $Http404 and result.len == 0:
         echo "[sessions] transient 404 (empty body), retrying: ", url.path, ", session: ", session.pretty
+        session.setCooldown()
+        raise rateLimitError()
+
+      if resp.status == $Http429:
+        echo "[sessions] 429 error, API: ", url.path, ", session: ", session.pretty
+        session.applyRateLimitHeaders(req, resp.headers)
         raise rateLimitError()
 
     let cacheStatus = resp.headers.getOrDefault(npCache)
@@ -162,9 +195,11 @@ template fetchImpl(result, fetchBody) {.dirty.} =
           elif errors in {rateLimited}:
             # rate limit hit, resets after 24 hours
             setLimited(session, req)
+            session.setCooldown()
             raise rateLimitError()
       elif result.startsWith("429 Too Many Requests"):
         echo "[sessions] 429 error, API: ", url.path, ", session: ", session.pretty
+        session.applyRateLimitHeaders(req, resp.headers)
         raise rateLimitError()
 
     fetchBody
@@ -177,10 +212,12 @@ template fetchImpl(result, fetchBody) {.dirty.} =
   except BadClientError as e:
     raise e
   except OSError as e:
+    session.setCooldown()
     raise e
   except Exception as e:
     let s = session.pretty
     echo "error: ", e.name, ", msg: ", e.msg, ", session: ", s, ", url: ", url
+    session.setCooldown()
     raise rateLimitError()
   finally:
     release(session)

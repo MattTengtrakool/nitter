@@ -9,11 +9,25 @@ var
   sessionPool: seq[Session]
   enableLogging = false
   # max requests at a time per session to avoid race conditions
-  maxConcurrentReqs = 2
+  maxConcurrentReqs = 1
+  minRequestIntervalMs = 3000
+  errorCooldownMs = 60 * 1000
+  rateLimitRemainingBuffer = 10
 
 proc setMaxConcurrentReqs*(reqs: int) =
   if reqs > 0:
     maxConcurrentReqs = reqs
+
+proc setSessionSafety*(minIntervalMs, cooldownMs, remainingBuffer: int) =
+  if minIntervalMs >= 0:
+    minRequestIntervalMs = minIntervalMs
+  if cooldownMs >= 0:
+    errorCooldownMs = cooldownMs
+  if remainingBuffer >= 0:
+    rateLimitRemainingBuffer = remainingBuffer
+
+proc nowMs(): int64 =
+  int64(epochTime() * 1000)
 
 template log(str: varargs[string, `$`]) =
   echo "[sessions] ", str.join("")
@@ -45,6 +59,7 @@ proc getSessionPoolHealth*(): JsonNode =
 
   var
     totalReqs = 0
+    coolingDown = 0
     limited: PackedSet[int64]
     reqsPerApi: Table[string, int]
     oldest = now.int64
@@ -71,6 +86,9 @@ proc getSessionPoolHealth*(): JsonNode =
       of oauth: inc oauthLimited
       of cookie: inc cookieLimited
 
+    if session.nextAvailableAt > nowMs():
+      inc coolingDown
+
     for api in session.apis.keys:
       let
         apiStatus = session.apis[api]
@@ -93,6 +111,7 @@ proc getSessionPoolHealth*(): JsonNode =
     "sessions": %*{
       "total": sessionPool.len,
       "limited": limited.card,
+      "cooling_down": coolingDown,
       "oauth": %*{"total": oauthTotal, "limited": oauthLimited},
       "cookie": %*{"total": cookieTotal, "limited": cookieLimited},
       "oldest": $fromUnix(oldest),
@@ -118,6 +137,8 @@ proc getSessionPoolDebug*(): JsonNode =
 
     if session.limited:
       sessionJson["limited"] = %true
+    if session.nextAvailableAt > nowMs():
+      sessionJson["cooldown_ms"] = %(session.nextAvailableAt - nowMs())
 
     for api in session.apis.keys:
       let
@@ -157,12 +178,31 @@ proc isLimited(session: Session; req: ApiReq): bool =
 
   if api in session.apis:
     let limit = session.apis[api]
-    return limit.remaining <= 10 and limit.reset > epochTime().int
+    return limit.remaining <= rateLimitRemainingBuffer and limit.reset > epochTime().int
   else:
     return false
 
+proc isCoolingDown(session: Session): bool =
+  not session.isNil and session.nextAvailableAt > nowMs()
+
 proc isReady(session: Session; req: ApiReq): bool =
-  not (session.isNil or session.pending > maxConcurrentReqs or session.isLimited(req))
+  not (session.isNil or session.pending >= maxConcurrentReqs or
+       session.isCoolingDown() or session.isLimited(req))
+
+proc reserve(session: Session) =
+  inc session.pending
+  if minRequestIntervalMs > 0:
+    let next = nowMs() + minRequestIntervalMs
+    if session.nextAvailableAt < next:
+      session.nextAvailableAt = next
+
+proc setCooldown*(session: Session; ms = errorCooldownMs) =
+  if session.isNil or ms <= 0:
+    return
+
+  let next = nowMs() + ms
+  if session.nextAvailableAt < next:
+    session.nextAvailableAt = next
 
 proc invalidate*(session: var Session) =
   if session.isNil: return
@@ -175,15 +215,22 @@ proc invalidate*(session: var Session) =
 
 proc release*(session: Session) =
   if session.isNil: return
-  dec session.pending
+  if session.pending > 0:
+    dec session.pending
 
 proc getSession*(req: ApiReq): Future[Session] {.async.} =
+  if sessionPool.len == 0:
+    log "no sessions available for API: ", req.cookie.endpoint
+    raise noSessionsError()
+
+  let start = rand(sessionPool.high)
   for i in 0 ..< sessionPool.len:
-    if result.isReady(req): break
-    result = sessionPool.sample()
+    result = sessionPool[(start + i) mod sessionPool.len]
+    if result.isReady(req):
+      break
 
   if not result.isNil and result.isReady(req):
-    inc result.pending
+    result.reserve()
   else:
     if result.isNil:
       log "no sessions available for API: ", req.cookie.endpoint
@@ -195,7 +242,8 @@ proc setLimited*(session: Session; req: ApiReq) =
   let api = req.endpoint(session)
   session.limited = true
   session.limitedAt = epochTime().int
-  log "rate limited by api: ", api, ", reqs left: ", session.apis[api].remaining, ", ", session.pretty
+  let remaining = if api in session.apis: session.apis[api].remaining else: 0
+  log "rate limited by api: ", api, ", reqs left: ", remaining, ", ", session.pretty
 
 proc setRateLimit*(session: Session; req: ApiReq; remaining, reset, limit: int) =
   # avoid undefined behavior in race conditions

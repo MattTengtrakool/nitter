@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
+import os
 import parsecfg except Config
 import types, strutils
 
@@ -9,6 +10,21 @@ proc get*[T](config: parseCfg.Config; section, key: string; default: T): T =
   when T is int: parseInt(val)
   elif T is bool: parseBool(val)
   elif T is string: val
+
+proc getEnvOrConfig(config: parseCfg.Config; envName, section, key, default: string): string =
+  let envVal = getEnv(envName).strip()
+  if envVal.len > 0: envVal
+  else: config.get(section, key, default)
+
+proc getEnvOrConfig(config: parseCfg.Config; envName, section, key: string; default: bool): bool =
+  let envVal = getEnv(envName).strip()
+  if envVal.len > 0: parseBool(envVal)
+  else: config.get(section, key, default)
+
+proc getEnvOrConfig(config: parseCfg.Config; envName, section, key: string; default: int): int =
+  let envVal = getEnv(envName).strip()
+  if envVal.len > 0: parseInt(envVal)
+  else: config.get(section, key, default)
 
 proc getConfig*(path: string): (Config, parseCfg.Config) =
   var cfg = loadConfig(path)
@@ -45,11 +61,16 @@ proc getConfig*(path: string): (Config, parseCfg.Config) =
     enableRSSSearch: masterRss and cfg.get("Config", "enableRSSSearch", true),
     enableRSSList: masterRss and cfg.get("Config", "enableRSSList", true),
     enableDebug: cfg.get("Config", "enableDebug", false),
-    proxy: cfg.get("Config", "proxy", ""),
-    proxyAuth: cfg.get("Config", "proxyAuth", ""),
-    apiProxy: cfg.get("Config", "apiProxy", ""),
+    proxy: cfg.getEnvOrConfig("NITTER_PROXY", "Config", "proxy", ""),
+    proxyAuth: cfg.getEnvOrConfig("NITTER_PROXY_AUTH", "Config", "proxyAuth", ""),
+    proxySessionPerAccount: cfg.getEnvOrConfig(
+      "NITTER_PROXY_SESSION_PER_ACCOUNT", "Config", "proxySessionPerAccount", false),
+    apiProxy: cfg.getEnvOrConfig("NITTER_API_PROXY", "Config", "apiProxy", ""),
     disableTid: cfg.get("Config", "disableTid", false),
-    maxConcurrentReqs: cfg.get("Config", "maxConcurrentReqs", 2),
+    maxConcurrentReqs: cfg.getEnvOrConfig("NITTER_MAX_CONCURRENT_REQS", "Config", "maxConcurrentReqs", 1),
+    minRequestIntervalMs: cfg.getEnvOrConfig("NITTER_MIN_REQUEST_INTERVAL_MS", "Config", "minRequestIntervalMs", 3000),
+    errorCooldownMs: cfg.getEnvOrConfig("NITTER_ERROR_COOLDOWN_MS", "Config", "errorCooldownMs", 60000),
+    rateLimitRemainingBuffer: cfg.getEnvOrConfig("NITTER_RATE_LIMIT_REMAINING_BUFFER", "Config", "rateLimitRemainingBuffer", 10),
     maxRetries: cfg.get("Config", "maxRetries", 1),
     retryDelayMs: cfg.get("Config", "retryDelayMs", 150)
   )

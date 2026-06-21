@@ -37,6 +37,19 @@ import nodriver as uc
 import pyotp
 
 
+def is_x_cookie(cookie):
+    domain = (getattr(cookie, "domain", "") or "").lower().lstrip(".")
+    return domain == "x.com" or domain.endswith(".x.com") or domain == "twitter.com" or domain.endswith(".twitter.com")
+
+
+def x_cookies_dict(cookies):
+    return {cookie.name: cookie.value for cookie in cookies if is_x_cookie(cookie)}
+
+
+def cookie_header(cookies_dict):
+    return "; ".join(f"{name}={value}" for name, value in sorted(cookies_dict.items()))
+
+
 async def login_and_get_cookies(account, headless=False):
     """Authenticate with X.com and extract session cookies"""
     # Note: headless mode may increase detection risk from bot-detection systems
@@ -49,7 +62,7 @@ async def login_and_get_cookies(account, headless=False):
 
     try:
         # Enter username
-        print(f"[*] Entering username {username}...", file=sys.stderr)
+        print("[*] Entering username...", file=sys.stderr)
 
         retry = 0
         while retry < 5:
@@ -116,7 +129,7 @@ async def login_and_get_cookies(account, headless=False):
         print("[*] Retrieving cookies...", file=sys.stderr)
         for _ in range(20):  # 20 second timeout
             cookies = await browser.cookies.get_all()
-            cookies_dict = {cookie.name: cookie.value for cookie in cookies}
+            cookies_dict = x_cookies_dict(cookies)
 
             if "auth_token" in cookies_dict and "ct0" in cookies_dict:
                 # Extract ID from twid cookie (may be URL-encoded)
@@ -196,6 +209,7 @@ async def main():
                 "id": cookies.get("id"),
                 "auth_token": cookies["auth_token"],
                 "ct0": cookies["ct0"],
+                "cookie_header": cookie_header(cookies),
             }
 
             if append_file:
@@ -210,7 +224,7 @@ async def main():
                 sleep(delay)
         except Exception as error:
             print(
-                f"[!] Error getting session for {acc["username"]}, skipping: {error}",
+                f"[!] Error getting session, skipping: {error}",
                 file=sys.stderr,
             )
 

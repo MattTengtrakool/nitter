@@ -24,7 +24,8 @@ proc parseSession*(raw: string): Session =
       id: id,
       username: session.username,
       authToken: session.authToken,
-      ct0: session.ct0
+      ct0: session.ct0,
+      cookieHeader: session.cookieHeader
     )
   else:
     raise newException(ValueError, "Unknown session kind: " & kind)

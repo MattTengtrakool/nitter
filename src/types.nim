@@ -37,6 +37,7 @@ type
     pending*: int
     limited*: bool
     limitedAt*: int
+    nextAvailableAt*: int64
     apis*: Table[string, RateLimit]
     case kind*: SessionKind
     of oauth:
@@ -45,6 +46,7 @@ type
     of cookie:
       authToken*: string
       ct0*: string
+      cookieHeader*: string
 
   Error* = enum
     null = 0
@@ -425,9 +427,13 @@ type
     enableDebug*: bool
     proxy*: string
     proxyAuth*: string
+    proxySessionPerAccount*: bool
     apiProxy*: string
     disableTid*: bool
     maxConcurrentReqs*: int
+    minRequestIntervalMs*: int
+    errorCooldownMs*: int
+    rateLimitRemainingBuffer*: int
     maxRetries*: int
     retryDelayMs*: int
 

@@ -10,7 +10,8 @@ import types, config, prefs, formatters, redis_cache, http_pool, auth, apiutils
 import views/[general, about]
 import routes/[
   preferences, timeline, status, media, search, rss, list, community, debug,
-  unsupported, embed, resolver, broadcast, space, article, router_utils]
+  unsupported, embed, resolver, broadcast, space, article, json_api,
+  router_utils]
 
 const instancesUrl = "https://github.com/zedeus/nitter/wiki/Instances"
 const issuesUrl = "https://github.com/zedeus/nitter/issues"
@@ -40,10 +41,12 @@ if cfg.hmacKey.len == 0 or cfg.hmacKey == "secretkey":
   stderr.flushFile
 setProxyEncoding(cfg.base64Media)
 setMaxHttpConns(cfg.httpMaxConns)
-setHttpProxy(cfg.proxy, cfg.proxyAuth)
+setHttpProxy(cfg.proxy, cfg.proxyAuth, cfg.proxySessionPerAccount)
 setApiProxy(cfg.apiProxy)
 setDisableTid(cfg.disableTid)
 setMaxConcurrentReqs(cfg.maxConcurrentReqs)
+setSessionSafety(
+  cfg.minRequestIntervalMs, cfg.errorCooldownMs, cfg.rateLimitRemainingBuffer)
 setMaxRetries(cfg.maxRetries)
 setRetryDelayMs(cfg.retryDelayMs)
 initAboutPage(cfg.staticDir)
@@ -67,6 +70,7 @@ createRssRouter(cfg)
 createBroadcastRouter(cfg)
 createSpaceRouter(cfg)
 createDebugRouter(cfg)
+createJsonApiRouter(cfg)
 
 settings:
   port = Port(cfg.port)
@@ -139,4 +143,5 @@ routes:
   extend broadcastRoute, ""
   extend spaceRoute, ""
   extend debug, ""
+  extend jsonApi, ""
   extend unsupported, ""
